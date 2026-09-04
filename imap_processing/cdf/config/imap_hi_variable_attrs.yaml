@@ -674,7 +674,7 @@ hi_goodtimes_met:
   VAR_TYPE: support_data
 
 hi_goodtimes_cull_flags:
-  <<: *default_uint8
+  <<: *default_uint16
   CATDESC: Cull flags indicating good (0) or bad (non-zero) times per spin bin
   DEPEND_0: epoch
   DEPEND_1: spin_bin

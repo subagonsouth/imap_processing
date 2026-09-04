@@ -936,7 +936,7 @@ class TestIntervalDtype:
         assert INTERVAL_DTYPE["spin_bin_high"] == np.uint8
         assert INTERVAL_DTYPE["n_bins"] == np.uint8
         assert INTERVAL_DTYPE["esa_step_mask"] == np.uint16
-        assert INTERVAL_DTYPE["cull_value"] == np.uint8
+        assert INTERVAL_DTYPE["cull_value"] == np.uint16
 
 
 def _create_l1b_de_dataset(
@@ -4207,6 +4207,7 @@ class TestApplyGoodtimesFilters:
             patch("imap_processing.hi.hi_goodtimes.mark_statistical_filter_0"),
             patch("imap_processing.hi.hi_goodtimes.mark_statistical_filter_1"),
             patch("imap_processing.hi.hi_goodtimes.mark_statistical_filter_2"),
+            patch("imap_processing.hi.hi_goodtimes.mark_sandwiched_esa_steps"),
         ):
             mock_cal_load.return_value = mock_cal
 
@@ -4222,7 +4223,7 @@ class TestApplyGoodtimesFilters:
             mock_cal_load.assert_called_once_with(cal_path)
 
     def test_calls_all_filters(self, tmp_path):
-        """Test that all 8 filters are called."""
+        """Test that all 9 filters are called."""
         mock_goodtimes = MagicMock()
         mock_goodtimes.goodtimes.get_cull_statistics.return_value = {
             "good_bins": 100,
@@ -4253,6 +4254,9 @@ class TestApplyGoodtimesFilters:
             patch(
                 "imap_processing.hi.hi_goodtimes.mark_statistical_filter_2"
             ) as mock_f7,
+            patch(
+                "imap_processing.hi.hi_goodtimes.mark_sandwiched_esa_steps"
+            ) as mock_f8,
         ):
             _apply_goodtimes_filters(
                 mock_goodtimes,
@@ -4271,6 +4275,7 @@ class TestApplyGoodtimesFilters:
             mock_f5.assert_called_once()
             mock_f6.assert_called_once()
             mock_f7.assert_called_once()
+            mock_f8.assert_called_once()
 
     def test_raises_statistical_filter_0_errors(self, tmp_path):
         """Test that ValueError from statistical filter 0 is raised."""

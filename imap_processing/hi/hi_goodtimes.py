@@ -37,7 +37,7 @@ INTERVAL_DTYPE: np.dtype = np.dtype(
         ("spin_bin_high", np.uint8),
         ("n_bins", np.uint8),
         ("esa_step_mask", np.uint16),  # Bitmask for ESA steps 1-10 (bit i = step i+1)
-        ("cull_value", np.uint8),
+        ("cull_value", np.uint16),
     ]
 )
 
@@ -54,6 +54,7 @@ class CullCode(IntEnum):
     STAT_FILTER_1 = 1 << 5  # 32
     STAT_FILTER_2 = 1 << 6  # 64
     BAD_HV_VALUE = 1 << 7  # 128
+    SANDWICHED_ESA_STEP = 1 << 8  # 256
 
 
 def hi_goodtimes(
@@ -78,6 +79,7 @@ def hi_goodtimes(
     5. mark_statistical_filter_0 - Detect drastic penetrating background changes
     6. mark_statistical_filter_1 - Detect isotropic count rate increases
     7. mark_statistical_filter_2 - Detect short-lived event pulses
+    8. mark_sandwiched_esa_steps - Remove ESA steps sandwiched between culled ones
 
     Parameters
     ----------
@@ -316,6 +318,10 @@ def _apply_goodtimes_filters(
         current_l1b_de,
     )
 
+    # 8. Final pass - remove ESA steps sandwiched between culled ones
+    logger.info("Applying filter: mark_sandwiched_esa_steps")
+    mark_sandwiched_esa_steps(goodtimes_ds)
+
 
 def create_goodtimes_dataset(l1b_de: xr.Dataset) -> xr.Dataset:
     """
@@ -367,7 +373,7 @@ def create_goodtimes_dataset(l1b_de: xr.Dataset) -> xr.Dataset:
     # Culling functions will set non-zero cull codes for bad times
     data_vars = {
         "cull_flags": xr.DataArray(
-            np.zeros((len(met), 90), dtype=np.uint8),
+            np.zeros((len(met), 90), dtype=np.uint16),
             dims=["met", "spin_bin"],
         ),
         "esa_step": xr.DataArray(esa_step.values, dims=["met"]),
@@ -558,7 +564,7 @@ class GoodtimesAccessor:
             f"Flagging {n_times} MET time(s) x {n_bins} spin bin(s) with "
             f"cull code {cull}"
         )
-        self._obj["cull_flags"].values[np.ix_(met_indices, bins_array)] |= np.uint8(
+        self._obj["cull_flags"].values[np.ix_(met_indices, bins_array)] |= np.uint16(
             cull
         )
 
@@ -2507,3 +2513,72 @@ def mark_statistical_filter_2(
         )
     else:
         logger.info("Statistical Filter 2: No pulse clusters identified")
+
+
+def mark_sandwiched_esa_steps(
+    goodtimes_ds: xr.Dataset,
+    cull_code: int = CullCode.SANDWICHED_ESA_STEP,
+) -> None:
+    """
+    Remove goodtimes for an ESA step sandwiched between two bad ones.
+
+    After all other culling filters have run, cull an ESA step within a sweep where
+    esa steps immediately before and after it (in step order, within the same sweep)
+    were both fully culled. Such an isolated good ESA step is not trustworthy
+    on its own, so this final pass marks it bad as well.
+
+    Parameters
+    ----------
+    goodtimes_ds : xarray.Dataset
+        Goodtimes dataset to update with cull flags. Must contain the
+        "cull_flags" and "esa_step" data variables.
+    cull_code : int, optional
+        Cull code to use for marking sandwiched ESA steps.
+        Default is CullCode.SANDWICHED_ESA_STEP.
+
+    Notes
+    -----
+    This function modifies goodtimes_ds in place. MET rows are already
+    ordered by sweep and then by increasing ESA step, so a 1D convolution
+    over that sequence directly finds culled neighbors. After convolution,
+    excluding the first and last ESA step values avoids inappropriate culling
+    across different esa sweeps.
+    """
+    logger.info("Running mark_sandwiched_esa_steps culling")
+
+    met_values = goodtimes_ds.coords["met"].values
+    if len(met_values) == 0:
+        logger.info("No MET values found, skipping")
+        return
+
+    esa_step_values = goodtimes_ds["esa_step"].values
+
+    # An ESA step (one MET row) is fully culled only when every spin bin
+    # in it is bad.
+    is_fully_culled = (goodtimes_ds["cull_flags"] != 0).all(dim="spin_bin").values
+
+    # Find METs with a fully culled neighbor on both sides using
+    # convolution. Kernel [1, 0, 1] sums neighbors without
+    # counting self; mode="constant" (cval=0) means the first/last MET in
+    # the whole dataset has an implicit "not culled" neighbor and so can
+    # never reach a sum of 2.
+    neighbor_kernel = np.array([1, 0, 1])
+    culled_neighbor_sum = convolve1d(
+        is_fully_culled.astype(int), neighbor_kernel, mode="constant"
+    )
+
+    is_edge_esa_step = (esa_step_values == esa_step_values.min()) | (
+        esa_step_values == esa_step_values.max()
+    )
+    sandwiched = (culled_neighbor_sum == 2) & ~is_edge_esa_step
+    # Remove sandwiched ESA steps that are already fully culled.
+    mask = sandwiched & ~is_fully_culled
+
+    if not np.any(mask):
+        logger.info("No sandwiched ESA steps identified")
+        return
+
+    mets_to_cull = met_values[mask]
+    goodtimes_ds.goodtimes.mark_bad_times(met=mets_to_cull, cull=cull_code)
+
+    logger.info(f"Marked {len(mets_to_cull)} sandwiched ESA step(s) as bad")
