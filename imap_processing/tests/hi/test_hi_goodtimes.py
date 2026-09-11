@@ -2552,6 +2552,37 @@ class TestIdentifyCullPattern:
         assert cull_mask.dims == ("esa_sweep", "esa_energy_step")
         assert not cull_mask.any()
 
+    def test_threshold_rounds_combined_expression_like_c(self):
+        """Test that median + scaled-sigma is rounded as a whole, matching C.
+
+        C computes `int(median + factor * sqrt(median + 1) + 0.5)` -- the
+        combined expression is rounded once. With median=4 and the raw
+        sigma=sqrt(5), the 5-sigma extreme threshold is
+        floor(4 + 5*sqrt(5) + 0.5) = 15, not 14 (which is what pre-rounding
+        sigma to round(sqrt(5))=2 before scaling would give).
+        """
+        counts = xr.DataArray(
+            np.zeros((4, 1)),
+            dims=["esa_sweep", "esa_energy_step"],
+            coords={"esa_sweep": np.arange(4), "esa_energy_step": [-1]},
+        )
+        median = xr.DataArray(
+            [4.0], dims=["esa_energy_step"], coords={"esa_energy_step": [-1]}
+        )
+        sigma = xr.DataArray(
+            [np.sqrt(5)], dims=["esa_energy_step"], coords={"esa_energy_step": [-1]}
+        )
+
+        # At the threshold value itself, not exceeded.
+        counts.loc[2, -1] = 15
+        cull_mask = _identify_cull_pattern(counts, median, sigma)
+        assert not cull_mask.sel(esa_sweep=2, esa_energy_step=-1).values
+
+        # One count above the threshold, exceeded.
+        counts.loc[2, -1] = 16
+        cull_mask = _identify_cull_pattern(counts, median, sigma)
+        assert cull_mask.sel(esa_sweep=2, esa_energy_step=-1).values
+
     def test_consecutive_run_with_esa_neighbor(self):
         """Test finding 3+ consecutive high counts with ESA neighbor confirmation."""
         counts, median, sigma = self._create_test_data(n_sweeps=10, n_esa_steps=5)
@@ -3133,8 +3164,11 @@ class TestComputeMedianAndSigmaPerEsa:
 
         for esa in range(1, 10):
             assert median_per_esa.sel(esa_energy_step=esa).values == 4.0
-            # sigma = round(sqrt(4 + 1)) = round(2.236) = 2
-            assert sigma_per_esa.sel(esa_energy_step=esa).values == 2
+            # sigma is returned raw (unrounded); rounding happens once, on
+            # the combined threshold, matching the C implementation.
+            np.testing.assert_allclose(
+                sigma_per_esa.sel(esa_energy_step=esa).values, np.sqrt(5)
+            )
 
     def test_zero_median_excluded(self):
         """Test that ESA energy steps with zero median are excluded."""

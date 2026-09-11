@@ -1837,14 +1837,18 @@ def _compute_median_and_sigma_per_esa(
     -------
     tuple[xarray.DataArray, xarray.DataArray]
         Tuple of (median_per_esa, sigma_per_esa) DataArrays with esa_energy_step
-        coordinate. ESA energy steps with zero/nan median or esa_energy_step=0
-        are set to NaN/0.
+        coordinate. sigma_per_esa is the raw (unrounded) value of
+        sqrt(median + 1); callers combine it with a sigma multiplier and round
+        the total threshold, matching the C drop_overmedian implementation
+        (`meds[i] + scalf * sqrt(meds[i] + 1) + 0.5`, truncated), rather than
+        rounding sigma on its own before scaling it. ESA energy steps with
+        zero/nan median or esa_energy_step=0 are set to NaN/0.
     """
     if not per_sweep_datasets:
         empty = xr.DataArray(
             [], dims=["esa_energy_step"], coords={"esa_energy_step": []}
         )
-        return empty, empty.astype(int)
+        return empty, empty.astype(float)
 
     # Concatenate datasets along esa_sweep dimension using xarray. This handles
     # different esa_energy_step coordinates by aligning and filling with NaN.
@@ -1856,8 +1860,8 @@ def _compute_median_and_sigma_per_esa(
     # Compute median along esa_sweep dimension using xarray
     median_per_esa = combined.median(dim="esa_sweep", skipna=True)
 
-    # Compute sigma: sigma ≈ √(median + 1) rounded to closest integer
-    sigma_per_esa = np.sqrt(median_per_esa + 1).round().astype(int)
+    # Raw (unrounded) sigma ≈ sqrt(median + 1); see docstring for rounding.
+    sigma_per_esa = np.sqrt(median_per_esa + 1)
 
     # Set invalid ESA energy steps (zero/nan median or esa_energy_step=0) to NaN/0
     esa_energy_step_coords = median_per_esa.coords["esa_energy_step"]
@@ -1972,7 +1976,7 @@ def _identify_cull_pattern(
     median_per_esa : xr.DataArray
         Median counts per ESA energy step.
     sigma_per_esa : xr.DataArray
-        Sigma values per ESA energy step.
+        Raw (unrounded) sigma values (sqrt(median + 1)) per ESA energy step.
     consecutive_threshold_sigma : float
         Sigma multiplier for consecutive interval check.
         Default is HiConstants.STAT_FILTER_1_CONSECUTIVE_SIGMA.
@@ -1989,9 +1993,16 @@ def _identify_cull_pattern(
         Boolean mask with dims (esa_sweep, esa_energy_step) where
         True = cull this position.
     """
-    # Compute thresholds using xarray broadcasting
-    consecutive_threshold = median_per_esa + consecutive_threshold_sigma * sigma_per_esa
-    extreme_threshold = median_per_esa + extreme_threshold_sigma * sigma_per_esa
+    # Compute thresholds using xarray broadcasting. Round the combined
+    # median + scaled-sigma value as a whole (floor of value + 0.5), matching
+    # the C implementation's `meds[i] + scalf * sqrt(meds[i] + 1) + 0.5`
+    # truncated to int, rather than rounding sigma on its own beforehand.
+    consecutive_threshold = np.floor(
+        median_per_esa + consecutive_threshold_sigma * sigma_per_esa + 0.5
+    )
+    extreme_threshold = np.floor(
+        median_per_esa + extreme_threshold_sigma * sigma_per_esa + 0.5
+    )
 
     # Compute exceeds masks - handle NaN by treating as False
     exceeds_consecutive = (current_counts > consecutive_threshold).fillna(False)
